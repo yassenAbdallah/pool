@@ -12,6 +12,7 @@
   const LEGACY_KEY = 'masahy.records.v1';
   const SESSION_KEY = 'masahy.session.v1';
   const HANDLE_KEY = 'datafile';
+  const CACHE_KEY = 'records-cache';
   const ALL = '__all__';
   const supportsFS =
     typeof window.showSaveFilePicker === 'function' &&
@@ -133,6 +134,25 @@
     });
   }
 
+  /* نسخة محلية من السجلات: تظهر فورًا وتشتغل من غير نت،
+     والملف يفضل هو المصدر الرسمي للحفظ. */
+  async function readCache() {
+    try {
+      const value = await idbGet(CACHE_KEY);
+      return Array.isArray(value) ? value.filter(isRecord) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function writeCache() {
+    try {
+      await idbSet(CACHE_KEY, records);
+    } catch {
+      /* تجاهل */
+    }
+  }
+
   /* ================= قراءة/كتابة ملف JSON ================= */
   function isRecord(r) {
     return r && typeof r === 'object' && typeof r.id === 'string' && typeof r.title === 'string';
@@ -226,6 +246,7 @@
       records = next;
       mode = 'file';
       connected = true;
+      writeCache();
 
       if (migrated || opts.fresh || dirty) {
         await writeToFile();
@@ -315,6 +336,8 @@
   /* ================= الحفظ ================= */
   function storageReady() {
     if (mode === 'local' || connected) return true;
+    // لو الملف معروف على الجهاز: نسمح بالتعديل مؤقتًا ونكتبه في الملف بعد الربط
+    if (storedHandle) return true;
     openConnectModal();
     toast('اربط ملف JSON الأول عشان نقدر نحفظ', 'error');
     return false;
@@ -325,6 +348,7 @@
       try {
         localStorage.setItem(LEGACY_KEY, JSON.stringify(records));
         dirty = false;
+        writeCache();
         return true;
       } catch {
         toast('تعذر الحفظ في المتصفح', 'error');
@@ -334,18 +358,21 @@
 
     if (!connected || !fileHandle) {
       dirty = true;
-      openConnectModal();
-      toast('اربط ملف JSON الأول عشان نقدر نحفظ', 'error');
+      writeCache();
+      if (!storedHandle) openConnectModal();
+      toast('التعديل اتحفظ مؤقتًا على الجهاز — اضغط «إعادة ربط الملف» لكتابته في الملف', 'error');
       return false;
     }
 
     try {
       await writeToFile();
       dirty = false;
+      writeCache();
       updateFileUI();
       return true;
     } catch (err) {
       dirty = true;
+      writeCache();
       connected = false;
       updateFileUI();
       const msg =
@@ -371,6 +398,7 @@
     try {
       records = await readFromFile();
       dirty = false;
+      writeCache();
       renderData();
       toast('تم التحديث من الملف', 'ok');
     } catch (err) {
@@ -398,11 +426,15 @@
       ? name || 'ملف JSON'
       : mode === 'local'
         ? 'حفظ المتصفح'
-        : 'مفيش ملف';
+        : storedHandle
+          ? storedHandle.name
+          : 'مفيش ملف';
 
     el.fileBanner.hidden = connected || mode === 'local';
     if (!connected && mode === 'file') {
-      el.bannerText.textContent = 'مفيش ملف بيانات متصل — التعديلات مش هتتحفظ.';
+      el.bannerText.textContent = records.length
+        ? 'بياناتك ظاهرة من آخر نسخة محفوظة — اضغط «إعادة ربط الملف» عشان التعديلات تتحفظ في الملف.'
+        : 'مفيش ملف بيانات متصل — التعديلات مش هتتحفظ.';
     }
 
     el.connectFile.hidden = !connected;
@@ -537,8 +569,15 @@
   }
 
   async function initStorage() {
+    // اعرض آخر نسخة محفوظة على الجهاز فورًا (تشتغل من غير نت)
+    const cached = await readCache();
+    if (cached.length && !records.length) {
+      records = cached;
+      updateFileUI();
+      renderCurrent();
+    }
+
     if (!supportsFS) {
-      records = [];
       updateFileUI();
       renderCurrent();
       openConnectModal();
@@ -552,7 +591,6 @@
     }
 
     if (!storedHandle) {
-      records = [];
       updateFileUI();
       renderCurrent();
       openConnectModal();
@@ -569,7 +607,6 @@
     if (perm === 'granted') {
       await attachHandle(storedHandle, { silent: true });
     } else {
-      records = [];
       updateFileUI();
       renderCurrent();
       openConnectModal();
@@ -748,7 +785,7 @@
     if (editingId === id) resetForm();
     renderNotebook();
     const ok = await persist();
-    toast(ok ? 'تم حذف السجل' : 'اتحذف من الشاشة — بس الحفظ في الملف فشل', ok ? 'ok' : 'error');
+    toast(ok ? 'تم حذف السجل' : 'اتحذف من الشاشة — هيتحذف من الملف بعد «إعادة ربط الملف»', ok ? 'ok' : 'error');
   }
 
   /* ================= البيانات ================= */
@@ -1035,7 +1072,7 @@
     resetForm();
     renderNotebook();
     const ok = await persist();
-    toast(ok ? message : 'اتحفظ في الشاشة — بس الكتابة في الملف فشلت', ok ? 'ok' : 'error');
+    toast(ok ? message : 'اتحفظ مؤقتًا على الجهاز — اضغط «إعادة ربط الملف» لكتابته في الملف', ok ? 'ok' : 'error');
     el.fTitle.focus();
   });
 
