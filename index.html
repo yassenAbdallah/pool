@@ -45,11 +45,19 @@
   <section id="screen-app" class="screen">
     <header class="topbar">
       <div class="brand"><span class="pip" aria-hidden="true"></span> مساحتي</div>
+      <button class="file-pill" id="file-pill" type="button" title="ملف البيانات">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="file-name">مفيش ملف</span>
+      </button>
       <div class="role-badge" id="role-badge"></div>
       <button class="btn ghost" id="logout" type="button">خروج</button>
     </header>
 
     <main class="container">
+      <div id="file-banner" class="file-banner" hidden>
+        <span id="banner-text">مفيش ملف بيانات متصل — التعديلات مش هتتحفظ.</span>
+        <button class="btn small-btn" id="banner-connect" type="button">اربط ملف JSON</button>
+      </div>
 
       <!-- ===== الدفتر ===== -->
       <div id="view-notebook" class="view" hidden>
@@ -119,6 +127,7 @@
             <p class="muted">كل اللي اتسجل من صفحة الدفتر — للعرض فقط.</p>
           </div>
           <div class="export-actions">
+            <button class="btn ghost" id="refresh-file" type="button">تحديث من الملف</button>
             <button class="btn ghost" id="export-csv" type="button">تصدير CSV</button>
             <button class="btn ghost" id="export-json" type="button">تصدير JSON</button>
           </div>
@@ -170,6 +179,25 @@
       <h3 id="m-title"></h3>
       <div class="modal-meta" id="m-meta"></div>
       <p class="modal-body" id="m-body"></p>
+    </div>
+  </div>
+
+  <!-- ===== مودال ملف البيانات ===== -->
+  <div id="connect-modal" class="modal" hidden>
+    <div class="modal-card connect-card" role="dialog" aria-modal="true" aria-labelledby="connect-title">
+      <button class="icon-btn modal-close" id="connect-close" type="button" aria-label="إغلاق">✕</button>
+      <div class="connect-icon" aria-hidden="true">📄</div>
+      <h3 id="connect-title">ملف البيانات</h3>
+      <p class="muted center connect-sub">الموقع بيحفظ كل السجلات في ملف JSON على جهازك.</p>
+      <p class="file-current" id="connect-file" hidden></p>
+      <div class="connect-actions">
+        <button class="btn primary" id="btn-new" type="button">إنشاء ملف جديد</button>
+        <button class="btn ghost" id="btn-open" type="button">فتح ملف موجود</button>
+        <button class="btn primary" id="btn-reconnect" type="button" hidden>إعادة ربط الملف</button>
+        <button class="btn ghost" id="btn-local" type="button" hidden>استخدام حفظ المتصفح</button>
+      </div>
+      <p class="msg-error" id="connect-error" role="alert"></p>
+      <p class="hint small center" id="connect-note">الحفظ المباشر في ملف مدعوم في Chrome وEdge على الكمبيوتر.</p>
     </div>
   </div>
 

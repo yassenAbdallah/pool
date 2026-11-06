@@ -2,15 +2,20 @@
    مساحتي — منطق الموقع
    - كلمة السر 123  =>  وضع الدفتر (إضافة/تعديل/حذف)
    - كلمة السر 321  =>  وضع البيانات (عرض فقط + تصدير)
-   البيانات بتتحفظ في localStorage على نفس المتصفح.
+   - الحفظ في ملف JSON على الجهاز عبر File System Access API
+     (Chrome / Edge). لو المتصفح مش بيدعمها: حفظ في localStorage.
    ========================================================= */
 (() => {
   'use strict';
 
   const PASSWORDS = { '123': 'notebook', '321': 'data' };
-  const STORE_KEY = 'masahy.records.v1';
+  const LEGACY_KEY = 'masahy.records.v1';
   const SESSION_KEY = 'masahy.session.v1';
+  const HANDLE_KEY = 'datafile';
   const ALL = '__all__';
+  const supportsFS =
+    typeof window.showSaveFilePicker === 'function' &&
+    typeof window.showOpenFilePicker === 'function';
 
   const $ = (id) => document.getElementById(id);
 
@@ -25,6 +30,11 @@
 
     roleBadge: $('role-badge'),
     logout: $('logout'),
+    filePill: $('file-pill'),
+    fileName: $('file-name'),
+    fileBanner: $('file-banner'),
+    bannerText: $('banner-text'),
+    bannerConnect: $('banner-connect'),
 
     viewNotebook: $('view-notebook'),
     viewData: $('view-data'),
@@ -50,6 +60,7 @@
     dBody: $('d-body'),
     dEmpty: $('d-empty'),
     dEmptyText: $('d-empty-text'),
+    refreshFile: $('refresh-file'),
     exportCsv: $('export-csv'),
     exportJson: $('export-json'),
 
@@ -59,23 +70,126 @@
     mTitle: $('m-title'),
     mMeta: $('m-meta'),
     mBody: $('m-body'),
+
+    connectModal: $('connect-modal'),
+    connectClose: $('connect-close'),
+    connectFile: $('connect-file'),
+    connectError: $('connect-error'),
+    connectNote: $('connect-note'),
+    btnNew: $('btn-new'),
+    btnOpen: $('btn-open'),
+    btnReconnect: $('btn-reconnect'),
+    btnLocal: $('btn-local'),
   };
 
   /** @type {'notebook'|'data'|null} */
   let role = null;
+  /** @type {'file'|'local'} */
+  let mode = supportsFS ? 'file' : 'file';
+  let connected = false;
+  let dirty = false;
+  let fileHandle = null;
+  let storedHandle = null;
+
   let records = [];
   let editingId = null;
   let toastTimer = null;
+  let picking = false;
 
-  /* ================= التخزين ================= */
   const uid = () =>
     window.crypto && crypto.randomUUID
       ? crypto.randomUUID()
       : 'r' + Date.now().toString(36) + Math.random().toString(16).slice(2);
 
-  function loadRecords() {
+  /* ================= IndexedDB (لتخزين مقبض الملف) ================= */
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('masahy-fs', 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains('kv')) req.result.createObjectStore('kv');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbGet(key) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readonly');
+      const rq = tx.objectStore('kv').get(key);
+      rq.onsuccess = () => resolve(rq.result ?? null);
+      rq.onerror = () => reject(rq.error);
+    });
+  }
+
+  async function idbSet(key, value) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  /* ================= قراءة/كتابة ملف JSON ================= */
+  function isRecord(r) {
+    return r && typeof r === 'object' && typeof r.id === 'string' && typeof r.title === 'string';
+  }
+
+  async function readFromFile() {
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    if (!text.trim()) return [];
+
+    let parsed;
     try {
-      const raw = localStorage.getItem(STORE_KEY);
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error('bad-json');
+    }
+
+    const list = Array.isArray(parsed)
+      ? parsed
+      : parsed && Array.isArray(parsed.records)
+        ? parsed.records
+        : [];
+
+    return list.filter(isRecord);
+  }
+
+  async function writeToFile() {
+    if (!fileHandle) throw new Error('no-handle');
+
+    const payload = JSON.stringify(
+      {
+        app: 'masahy',
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        records,
+      },
+      null,
+      2
+    );
+
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(payload);
+      await writable.close();
+    } catch (err) {
+      try {
+        await writable.abort();
+      } catch {
+        /* تجاهل */
+      }
+      throw err;
+    }
+  }
+
+  function readLegacy() {
+    try {
+      const raw = localStorage.getItem(LEGACY_KEY);
       const list = raw ? JSON.parse(raw) : [];
       return Array.isArray(list) ? list.filter(isRecord) : [];
     } catch {
@@ -83,16 +197,255 @@
     }
   }
 
-  function isRecord(r) {
-    return r && typeof r === 'object' && typeof r.id === 'string' && typeof r.title === 'string';
+  /* ================= ربط الملف ================= */
+  async function attachHandle(handle, opts = {}) {
+    try {
+      let perm = await handle.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') throw new Error('permission');
+
+      fileHandle = handle;
+      storedHandle = handle;
+      idbSet(HANDLE_KEY, handle).catch(() => {});
+
+      let next = records;
+      let migrated = false;
+
+      if (!dirty) {
+        const fromFile = await readFromFile();
+        next = fromFile;
+        if (!next.length) {
+          const legacy = readLegacy();
+          if (legacy.length) {
+            next = legacy;
+            migrated = true;
+          }
+        }
+      }
+
+      records = next;
+      mode = 'file';
+      connected = true;
+
+      if (migrated || opts.fresh || dirty) {
+        await writeToFile();
+        dirty = false;
+        if (migrated) localStorage.removeItem(LEGACY_KEY);
+      }
+
+      el.connectError.textContent = '';
+      closeConnectModal();
+      updateFileUI();
+      renderCurrent();
+
+      if (!opts.silent) {
+        toast(migrated ? 'تم ربط الملف ونقل بياناتك القديمة' : 'تم ربط ملف البيانات', 'ok');
+      }
+    } catch (err) {
+      connected = false;
+      fileHandle = null;
+      dirty = false;
+      updateFileUI();
+
+      if (err && err.name === 'AbortError') return;
+
+      let msg = 'تعذر ربط الملف.';
+      if (err && err.name === 'NotAllowedError') msg = 'محتاج إذن الكتابة في الملف.';
+      else if (err && err.message === 'bad-json') msg = 'الملف ده مش JSON صالح. اختار ملف تاني.';
+      else if (err && err.name === 'NotFoundError') msg = 'الملف مش موجود. اختار ملف تاني.';
+
+      el.connectError.textContent = msg;
+      openConnectModal();
+      toast(msg, 'error');
+      renderCurrent();
+    }
   }
 
-  function persist() {
+  async function pickNewFile() {
+    if (picking) return;
+    picking = true;
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify(records));
-    } catch {
-      toast('مش قادر أحفظ البيانات — مساحة المتصفح ممكن تكون مليانة.', 'error');
+      const handle = await window.showSaveFilePicker({
+        suggestedName: 'masahy-data.json',
+        types: [{ description: 'ملف JSON', accept: { 'application/json': ['.json'] } }],
+      });
+      await attachHandle(handle, { fresh: true });
+    } catch (err) {
+      if (!err || err.name !== 'AbortError') {
+        el.connectError.textContent = 'تعذر إنشاء الملف. جرّب تاني.';
+        openConnectModal();
+      }
+    } finally {
+      picking = false;
     }
+  }
+
+  async function pickExistingFile() {
+    if (picking) return;
+    picking = true;
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        multiple: false,
+        types: [{ description: 'ملف JSON', accept: { 'application/json': ['.json'] } }],
+      });
+      await attachHandle(handle, {});
+    } catch (err) {
+      if (!err || err.name !== 'AbortError') {
+        el.connectError.textContent = 'تعذر فتح الملف. جرّب تاني.';
+        openConnectModal();
+      }
+    } finally {
+      picking = false;
+    }
+  }
+
+  async function reconnectStored() {
+    if (!storedHandle) {
+      openConnectModal();
+      return;
+    }
+    picking = true;
+    try {
+      await attachHandle(storedHandle, {});
+    } finally {
+      picking = false;
+    }
+  }
+
+  /* ================= الحفظ ================= */
+  function storageReady() {
+    if (mode === 'local' || connected) return true;
+    openConnectModal();
+    toast('اربط ملف JSON الأول عشان نقدر نحفظ', 'error');
+    return false;
+  }
+
+  async function persist() {
+    if (mode === 'local') {
+      try {
+        localStorage.setItem(LEGACY_KEY, JSON.stringify(records));
+        dirty = false;
+        return true;
+      } catch {
+        toast('تعذر الحفظ في المتصفح', 'error');
+        return false;
+      }
+    }
+
+    if (!connected || !fileHandle) {
+      dirty = true;
+      openConnectModal();
+      toast('اربط ملف JSON الأول عشان نقدر نحفظ', 'error');
+      return false;
+    }
+
+    try {
+      await writeToFile();
+      dirty = false;
+      updateFileUI();
+      return true;
+    } catch (err) {
+      dirty = true;
+      connected = false;
+      updateFileUI();
+      const msg =
+        err && err.name === 'NotAllowedError'
+          ? 'الصلاحية انتهت — اضغط «إعادة ربط الملف».'
+          : 'تعذر الحفظ في ملف البيانات.';
+      el.connectError.textContent = msg;
+      openConnectModal();
+      toast(msg, 'error');
+      return false;
+    }
+  }
+
+  async function reloadFromFile() {
+    if (mode === 'local') {
+      toast('الحفظ المحلي مفعّل', 'ok');
+      return;
+    }
+    if (!connected || !fileHandle) {
+      openConnectModal();
+      return;
+    }
+    try {
+      records = await readFromFile();
+      dirty = false;
+      renderData();
+      toast('تم التحديث من الملف', 'ok');
+    } catch (err) {
+      if (err && err.message === 'bad-json') {
+        toast('ملف البيانات مش JSON صالح', 'error');
+        return;
+      }
+      connected = false;
+      updateFileUI();
+      openConnectModal();
+      toast('تعذر قراءة الملف', 'error');
+    }
+  }
+
+  /* ================= واجهة حالة الملف ================= */
+  function updateFileUI() {
+    const name = fileHandle
+      ? fileHandle.name
+      : storedHandle
+        ? storedHandle.name
+        : '';
+
+    el.filePill.classList.toggle('connected', connected);
+    el.fileName.textContent = connected
+      ? name || 'ملف JSON'
+      : mode === 'local'
+        ? 'حفظ المتصفح'
+        : 'مفيش ملف';
+
+    el.fileBanner.hidden = connected || mode === 'local';
+    if (!connected && mode === 'file') {
+      el.bannerText.textContent = 'مفيش ملف بيانات متصل — التعديلات مش هتتحفظ.';
+    }
+
+    el.connectFile.hidden = !connected;
+    el.connectFile.textContent = connected ? '📄 ' + (name || 'ملف JSON') : '';
+
+    const needReconnect = !!storedHandle && !connected;
+    el.btnReconnect.hidden = !(supportsFS && needReconnect);
+    el.btnNew.hidden = !supportsFS;
+    el.btnOpen.hidden = !supportsFS;
+    el.btnOpen.textContent = needReconnect ? 'اختيار ملف آخر' : 'فتح ملف موجود';
+    el.btnLocal.hidden = supportsFS;
+
+    el.connectNote.textContent = supportsFS
+      ? 'الحفظ المباشر في ملف مدعوم في Chrome وEdge على الكمبيوتر.'
+      : 'متصفحك لا يدعم الحفظ المباشر في الملفات. استخدم Chrome أو Edge، أو استخدم حفظ المتصفح.';
+  }
+
+  function openConnectModal() {
+    updateFileUI();
+    el.connectModal.hidden = false;
+    document.body.style.overflow = 'hidden';
+    const target = !el.btnReconnect.hidden
+      ? el.btnReconnect
+      : !el.btnNew.hidden
+        ? el.btnNew
+        : el.btnLocal;
+    if (target && !target.hidden) target.focus();
+  }
+
+  function closeConnectModal() {
+    el.connectModal.hidden = true;
+    if (el.modal.hidden) document.body.style.overflow = '';
+    el.connectError.textContent = '';
+  }
+
+  function useLocalMode() {
+    mode = 'local';
+    connected = false;
+    records = readLegacy();
+    closeConnectModal();
+    updateFileUI();
+    renderCurrent();
+    toast('هنحفظ في متصفحك — استخدم تصدير JSON للنسخ الاحتياطي', 'ok');
   }
 
   /* ================= الجلسة ================= */
@@ -178,13 +531,52 @@
   function showLoginError(message) {
     el.loginError.textContent = message;
     el.password.classList.remove('shake');
-    // إعادة تشغيل الأنيميشن
     void el.password.offsetWidth;
     el.password.classList.add('shake');
     el.password.select();
   }
 
-  function enterApp(newRole) {
+  async function initStorage() {
+    if (!supportsFS) {
+      records = [];
+      updateFileUI();
+      renderCurrent();
+      openConnectModal();
+      return;
+    }
+
+    try {
+      storedHandle = await idbGet(HANDLE_KEY);
+    } catch {
+      storedHandle = null;
+    }
+
+    if (!storedHandle) {
+      records = [];
+      updateFileUI();
+      renderCurrent();
+      openConnectModal();
+      return;
+    }
+
+    let perm = 'prompt';
+    try {
+      perm = await storedHandle.queryPermission({ mode: 'readwrite' });
+    } catch {
+      perm = 'prompt';
+    }
+
+    if (perm === 'granted') {
+      await attachHandle(storedHandle, { silent: true });
+    } else {
+      records = [];
+      updateFileUI();
+      renderCurrent();
+      openConnectModal();
+    }
+  }
+
+  async function enterApp(newRole) {
     role = newRole;
     el.roleBadge.textContent = newRole === 'notebook' ? '📓 وضع الدفتر' : '📊 وضع البيانات';
     el.roleBadge.classList.toggle('data', newRole === 'data');
@@ -193,30 +585,46 @@
     el.loginScreen.classList.remove('active');
     el.appScreen.classList.add('active');
     window.scrollTo({ top: 0, behavior: 'auto' });
-    refresh(newRole === 'notebook');
+
+    records = [];
+    updateFileUI();
+    renderCurrent();
+    await initStorage();
+
+    if (newRole === 'data' && connected) {
+      try {
+        records = await readFromFile();
+        dirty = false;
+        renderData();
+      } catch {
+        /* لو القراءة فشلت، سيب المعروض زي ما هو */
+      }
+    }
   }
 
   function logout() {
     clearSession();
     role = null;
+    records = [];
+    connected = false;
+    dirty = false;
+    fileHandle = null;
     resetForm();
     el.dSearch.value = '';
     el.nbSearch.value = '';
+    closeConnectModal();
+    closeModal();
     el.appScreen.classList.remove('active');
     el.loginScreen.classList.add('active');
     el.password.value = '';
     el.loginError.textContent = '';
+    updateFileUI();
     el.password.focus();
   }
 
-  function refresh(focusTitle = false) {
-    records = loadRecords();
-    if (role === 'notebook') {
-      renderNotebook();
-      if (focusTitle) el.fTitle.focus();
-    } else if (role === 'data') {
-      renderData();
-    }
+  function renderCurrent() {
+    if (role === 'notebook') renderNotebook();
+    else if (role === 'data') renderData();
   }
 
   /* ================= الدفتر ================= */
@@ -330,16 +738,17 @@
     el.cancelBtn.hidden = true;
   }
 
-  function removeRecord(id) {
+  async function removeRecord(id) {
     const r = records.find((x) => x.id === id);
     if (!r) return;
+    if (!storageReady()) return;
     if (!window.confirm(`تحذف السجل «${r.title}»؟`)) return;
 
     records = records.filter((x) => x.id !== id);
-    persist();
     if (editingId === id) resetForm();
     renderNotebook();
-    toast('تم حذف السجل', 'ok');
+    const ok = await persist();
+    toast(ok ? 'تم حذف السجل' : 'اتحذف من الشاشة — بس الحفظ في الملف فشل', ok ? 'ok' : 'error');
   }
 
   /* ================= البيانات ================= */
@@ -484,7 +893,7 @@
 
   function closeModal() {
     el.modal.hidden = true;
-    document.body.style.overflow = '';
+    if (el.connectModal.hidden) document.body.style.overflow = '';
   }
 
   /* ================= التصدير ================= */
@@ -571,9 +980,20 @@
 
   el.logout.addEventListener('click', logout);
 
+  el.filePill.addEventListener('click', openConnectModal);
+  el.bannerConnect.addEventListener('click', openConnectModal);
+  el.connectClose.addEventListener('click', closeConnectModal);
+  el.connectModal.addEventListener('click', (e) => {
+    if (e.target === el.connectModal) closeConnectModal();
+  });
+  el.btnNew.addEventListener('click', pickNewFile);
+  el.btnOpen.addEventListener('click', pickExistingFile);
+  el.btnReconnect.addEventListener('click', reconnectStored);
+  el.btnLocal.addEventListener('click', useLocalMode);
+
   el.nbSearch.addEventListener('input', renderNotebook);
 
-  el.recordForm.addEventListener('submit', (e) => {
+  el.recordForm.addEventListener('submit', async (e) => {
     e.preventDefault();
 
     const title = el.fTitle.value.trim();
@@ -590,15 +1010,17 @@
       el.fContent.focus();
       return;
     }
+    if (!storageReady()) return;
 
     const now = Date.now();
+    let message = 'تم حفظ السجل';
 
     if (editingId) {
       const idx = records.findIndex((r) => r.id === editingId);
       if (idx > -1) {
         records[idx] = { ...records[idx], title, category, content, updatedAt: now };
       }
-      toast('تم تحديث السجل', 'ok');
+      message = 'تم تحديث السجل';
     } else {
       records.unshift({
         id: uid(),
@@ -608,12 +1030,12 @@
         createdAt: now,
         updatedAt: now,
       });
-      toast('تم حفظ السجل', 'ok');
     }
 
-    persist();
     resetForm();
     renderNotebook();
+    const ok = await persist();
+    toast(ok ? message : 'اتحفظ في الشاشة — بس الكتابة في الملف فشلت', ok ? 'ok' : 'error');
     el.fTitle.focus();
   });
 
@@ -641,6 +1063,7 @@
 
   el.dSearch.addEventListener('input', renderData);
   el.dFilter.addEventListener('change', renderData);
+  el.refreshFile.addEventListener('click', reloadFromFile);
   el.exportCsv.addEventListener('click', exportCSV);
   el.exportJson.addEventListener('click', exportJSON);
 
@@ -666,15 +1089,16 @@
   el.modalClose.addEventListener('click', closeModal);
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !el.modal.hidden) closeModal();
+    if (e.key !== 'Escape') return;
+    if (!el.connectModal.hidden) closeConnectModal();
+    else if (!el.modal.hidden) closeModal();
   });
 
-  // مزامنة لو البيانات اتغيرت في تاب تاني
+  // مزامنة وضع الحفظ المحلي بين التابات
   window.addEventListener('storage', (e) => {
-    if (e.key === STORE_KEY && role) {
-      records = loadRecords();
-      if (role === 'notebook') renderNotebook();
-      else renderData();
+    if (mode === 'local' && e.key === LEGACY_KEY && role) {
+      records = readLegacy();
+      renderCurrent();
     }
   });
 

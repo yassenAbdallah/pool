@@ -326,7 +326,6 @@ select {
 }
 
 .role-badge {
-  margin-inline-start: auto;
   padding: 7px 14px;
   font-size: 12.5px;
   font-weight: 700;
@@ -340,6 +339,66 @@ select {
   color: #a8f0fb;
   background: rgba(34, 211, 238, 0.12);
   border-color: rgba(34, 211, 238, 0.35);
+}
+
+/* حالة ملف البيانات */
+.file-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 210px;
+  margin-inline-start: auto;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, color 0.18s;
+}
+.file-pill:hover { background: rgba(255, 255, 255, 0.09); border-color: var(--stroke-strong); }
+.file-pill #file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-pill .dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fbbf24;
+}
+.file-pill.connected {
+  color: #c6f7e4;
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+.file-pill.connected .dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18);
+}
+
+.file-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  font-size: 13.5px;
+  color: #ffe6b3;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 14px;
+}
+
+.small-btn { padding: 7px 14px; font-size: 12.5px; }
+
+.export-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* ================= الحاوية والعناوين ================= */
@@ -703,6 +762,45 @@ tbody td:last-child { width: 64px; text-align: center; }
   color: #d7def0;
 }
 
+/* مودال ملف البيانات */
+.connect-card {
+  width: min(460px, 100%);
+  padding-top: 30px;
+  text-align: center;
+}
+.connect-icon {
+  width: 62px;
+  height: 62px;
+  margin: 0 auto 14px;
+  display: grid;
+  place-items: center;
+  font-size: 28px;
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(108, 140, 255, 0.25), rgba(34, 211, 238, 0.1));
+  border: 1px solid rgba(108, 140, 255, 0.35);
+}
+.connect-card h3 { margin: 0 0 8px; font-size: 21px; }
+.connect-sub { margin-bottom: 14px; font-size: 13.5px; }
+.file-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 auto 2px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #c7d3ff;
+  background: rgba(108, 140, 255, 0.14);
+  border: 1px solid rgba(108, 140, 255, 0.3);
+  border-radius: 999px;
+  overflow-wrap: anywhere;
+}
+.connect-actions { display: grid; gap: 10px; margin-top: 18px; }
+.connect-actions .btn { width: 100%; }
+.connect-card .msg-error { margin-top: 12px; }
+.connect-card .hint { margin: 14px 0 0; }
+
 /* ================= اهتزاز الخطأ ================= */
 .shake { animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both; }
 @keyframes shake {
@@ -716,6 +814,11 @@ tbody td:last-child { width: 64px; text-align: center; }
 @media (max-width: 900px) {
   .notebook-layout { grid-template-columns: 1fr; }
   .form-card { position: static; }
+}
+
+@media (max-width: 700px) {
+  .role-badge { display: none; }
+  .file-pill { max-width: 130px; }
 }
 
 @media (max-width: 600px) {
